@@ -18,10 +18,12 @@
     float _firstX;
     float _firstY;
 }
-@property (nonatomic, strong) RPBroadcastController *broadcastController;
+@property (nonatomic, weak) RPBroadcastController *broadcastController;
 @property (nonatomic, strong) UIWindow *overlayWindow;
 @property (nonatomic, strong) UIButton *broadcastButton;
 @property (nonatomic, weak)   UIView   *cameraPreview;
+@property (nonatomic, strong) NSURL *chatURL;
+@property (nonatomic, strong) UIWebView* chatView;
 @end
 
 @implementation AAPLGameViewController
@@ -95,6 +97,7 @@
     [self setupBroadcastUI];
 }
 
+#pragma mark - Setup ReplayKit Live
 - (void)setupBroadcastUI {
     UIViewController *rootViewController = [[UIViewController alloc] init];
     self.overlayWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
@@ -109,61 +112,102 @@
     self.broadcastButton.frame = CGRectMake(self.view.frame.size.width - 120.0, -15.0, 125.0, 125.0);
     [self.broadcastButton addTarget:self action:@selector(didPressBroadcast) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:self.broadcastButton];
+    
+    //
+    // Enable Microphone and Camera
+    //
     [RPScreenRecorder sharedRecorder].microphoneEnabled = YES;
     [RPScreenRecorder sharedRecorder].cameraEnabled = YES;
+    
+    
+    // Get notified when app is returned to active state or
+    // is moved into the foreground
+    //
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(resumeBroadcast)
+                                                 name:UIApplicationDidBecomeActiveNotification
+                                               object:[UIApplication sharedApplication]];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(resumeBroadcast)
+                                                 name:UIApplicationWillEnterForegroundNotification
+                                               object:[UIApplication sharedApplication]];
+}
+- (void) resumeBroadcast
+{
+    // Tell ReplayKit to Resume broadcasting
+    
+    if(self.broadcastController.paused)
+    {
+        [self.broadcastController resumeBroadcast];
+    }
 }
 
+#pragma mark - Handle Broadcast Button Touch
 - (void)didPressBroadcast {
-    
-    NSLog(@"didPressBroadcast");
     
     __weak AAPLGameViewController* bSelf = self;
     if (![RPScreenRecorder sharedRecorder].isRecording) {
+        
+        // We aren't currently broadcasting, bring up the share sheet.
+        
         [RPBroadcastActivityViewController loadBroadcastActivityViewControllerWithHandler:^(RPBroadcastActivityViewController * _Nullable broadcastActivityViewController, NSError * _Nullable error) {
+            
+            
+            // Here we are going to bring up the Broadcast share sheet where the user will be able to pick
+            // a broadcast provider
             
             broadcastActivityViewController.delegate = bSelf;
             broadcastActivityViewController.modalPresentationStyle = UIModalPresentationPopover;
-            broadcastActivityViewController.popoverPresentationController.sourceRect = bSelf.broadcastButton.frame;
-            broadcastActivityViewController.popoverPresentationController.sourceView = bSelf.broadcastButton;
+            
+            if(UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPad)
+            {
+                broadcastActivityViewController.popoverPresentationController.sourceRect = bSelf.broadcastButton.frame;
+                broadcastActivityViewController.popoverPresentationController.sourceView = bSelf.broadcastButton;
+            }
+            
             
             [bSelf presentViewController:broadcastActivityViewController animated:YES completion:nil];
         }];
         
     } else {
+        // We are currently broadcasting, disconnect.
         NSLog(@"Disconnecting");
         [self.broadcastController finishBroadcastWithHandler:^(NSError * _Nullable error) {
+            bSelf.chatURL = nil;
+            [bSelf tap:nil];
             [bSelf.broadcastButton setImage:[UIImage imageNamed:@"broadcast_button"] forState:UIControlStateNormal];
             [bSelf.cameraPreview removeFromSuperview];
             
         }];
     }
 }
-- (void) pan: (UIPanGestureRecognizer*) sender
-{
-    CGPoint translation = [sender translationInView:self.view];
-   
-    CGRect recognizerFrame = sender.view.frame;
-    recognizerFrame.origin.x += translation.x;
-    recognizerFrame.origin.y += translation.y;
-    
-    sender.view.frame = recognizerFrame;
-    
-    [sender setTranslation:CGPointMake(0, 0) inView:self.view];
-}
+#pragma mark - Broadcasting
 - (void)broadcastActivityViewController:(RPBroadcastActivityViewController *)broadcastActivityViewController
        didFinishWithBroadcastController:(RPBroadcastController *)broadcastController
                                   error:(NSError *)error
 {
+    
+    // User has selected a broadcast service, now we should start streaming.
+    
     [broadcastActivityViewController dismissViewControllerAnimated:YES completion:nil];
     
-    broadcastController.delegate = self;
+    if([broadcastController.broadcastExtensionBundleID rangeOfString:@"com.mobcrush.Mobcrush"].location != NSNotFound)
+    {
+        // User has chosen Mobcrush. We can use the broadcast URL to generate the user's chat URL by
+        // appending "/chat" to the end of it.
+        self.chatURL = [NSURL URLWithString:[broadcastController.broadcastURL.absoluteString stringByAppendingString:@"/chat"]];
+    }
     self.broadcastController = broadcastController;
     
     __weak AAPLGameViewController* bSelf = self;
-
-    [broadcastController startBroadcastWithHandler:^(NSError * _Nullable error) {
     
+    [broadcastController startBroadcastWithHandler:^(NSError * _Nullable error) {
+        
         if (!error) {
+            
+            // Broadcast has started
+            bSelf.broadcastController.delegate = self;
+            NSLog(@"Share URL: %@", broadcastController.broadcastURL);
             
             [bSelf.broadcastButton setImage:[UIImage imageNamed:@"broadcast_button_on"] forState:UIControlStateNormal];
             
@@ -172,16 +216,26 @@
             
             if(cameraView)
             {
+                // If the camera is enabled, create the camera preview and add it to the game's UIView
+                
                 cameraView.frame = CGRectMake(0, 0, 200, 200);
                 [bSelf.view addSubview:cameraView];
-                UIPanGestureRecognizer* gr = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(pan:)];
-                [gr setMinimumNumberOfTouches:1];
-                [gr setMaximumNumberOfTouches:1];
-                [cameraView addGestureRecognizer:gr];
+                {
+                    // Add a gesture recognizer so the user can drag the camera around the screen
+                    UIPanGestureRecognizer* gr = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(pan:)];
+                    [gr setMinimumNumberOfTouches:1];
+                    [gr setMaximumNumberOfTouches:1];
+                    [cameraView addGestureRecognizer:gr];
+                }
+                {
+                    UITapGestureRecognizer* gr = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tap:)];
+                    [cameraView addGestureRecognizer:gr];
+                }
             }
             
         }
         else {
+            // Some error has occurred starting the broadcast, surface it to the user.
             UIAlertController *alertController = [UIAlertController alertControllerWithTitle:@"Error"
                                                                                      message:error.localizedDescription
                                                                               preferredStyle:UIAlertControllerStyleAlert];
@@ -197,21 +251,76 @@
         }
     }];
 }
+
+// Watch for service info from broadcast service
 - (void)broadcastController:(RPBroadcastController *)broadcastController
        didUpdateServiceInfo:(NSDictionary <NSString *, NSObject <NSCoding> *> *)serviceInfo
 {
-    NSLog(@"ServiceInfo: %@", serviceInfo);
+    NSLog(@"didUpdateServiceInfo: %@", serviceInfo);
 }
-- (void)broadcastController:(RPBroadcastController *)broadcastController didFinishWithError:(NSError *)error
+
+// Broadcast service encountered an error
+- (void)broadcastController:(RPBroadcastController *)broadcastController
+         didFinishWithError:(NSError *)error
 {
     NSLog(@"didFinishWithError: %@", error);
     
     __weak AAPLGameViewController* bSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
+        bSelf.chatURL = nil;
+        [bSelf tap:nil];
         [bSelf.broadcastButton setImage:[UIImage imageNamed:@"broadcast_button"] forState:UIControlStateNormal];
         [bSelf.cameraPreview removeFromSuperview];
     });
 }
+#pragma mark - Gesture Recognizers for Camera
+- (void) pan: (UIPanGestureRecognizer*) sender
+{
+    // Move the Camera view around by dragging
+    CGPoint translation = [sender translationInView:self.view];
+   
+    {
+        CGRect recognizerFrame = sender.view.frame;
+        recognizerFrame.origin.x += translation.x;
+        recognizerFrame.origin.y += translation.y;
+        
+        sender.view.frame = recognizerFrame;
+    }
+    if(self.chatView)
+    {
+        CGRect recognizerFrame = self.chatView.frame;
+        recognizerFrame.origin.x += translation.x;
+        recognizerFrame.origin.y += translation.y;
+        
+        self.chatView.frame = recognizerFrame;
+    }
+    
+    [sender setTranslation:CGPointMake(0, 0) inView:self.view];
+}
+
+- (void) tap: (UITapGestureRecognizer*) sender
+{
+    // Load the chat view if we have a chat URL
+    if(!self.chatView && self.chatURL)
+    {
+        self.chatView = [[UIWebView alloc] initWithFrame:CGRectMake(self.cameraPreview.frame.origin.x,
+                                                                    CGRectGetMaxY(self.cameraPreview.frame),
+                                                                    300,
+                                                                    500)];
+        
+        NSURLRequest* request = [NSURLRequest requestWithURL:self.chatURL];
+        [self.chatView loadRequest:request];
+        [self.chatView setBackgroundColor:[UIColor clearColor]];
+        [self.chatView setOpaque:NO];
+        [self.view addSubview:self.chatView];
+    }
+    else if(self.chatView)
+    {
+        [self.chatView removeFromSuperview];
+        self.chatView = nil;
+    }
+}
+
 #pragma mark - Game view
 
 - (AAPLGameView *)gameView {
