@@ -1,3 +1,9 @@
+
+# ReplayKit Live Demo
+
+This repository demonstrates how to setup ReplayKit Live using a SceneKit demo game.  See https://github.com/Mobcrush/ReplayKitDemo/blob/master/Objective-C/Common/AAPLGameViewController.m for the reference implementation.
+
+
 # Fox: Building a SceneKit Game with the Xcode Scene Editor
 
 This sample code demonstrates how to use Xcode to build a SceneKit level, choose the renderer in between Metal and OpenGL ES, add positional audio triggers, and setup light maps with the new material properties.
