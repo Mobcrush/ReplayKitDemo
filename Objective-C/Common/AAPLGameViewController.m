@@ -13,6 +13,9 @@
 #import <ReplayKit/ReplayKit.h>
 #import "AAPLGameViewControllerPrivate.h"
 
+#define SYSTEM_VERSION_GREATER_THAN_OR_EQUAL_TO(v)  ([[[UIDevice currentDevice] systemVersion] compare:v options:NSNumericSearch] != NSOrderedAscending)
+
+
 @interface AAPLGameViewController () <RPBroadcastActivityViewControllerDelegate, RPBroadcastControllerDelegate>
 {
     float _firstX;
@@ -24,6 +27,7 @@
 @property (nonatomic, weak)   UIView   *cameraPreview;
 @property (nonatomic, strong) NSURL *chatURL;
 @property (nonatomic, strong) UIWebView* chatView;
+@property (nonatomic, assign) BOOL allowLive;
 @end
 
 @implementation AAPLGameViewController
@@ -40,7 +44,7 @@
     self.gameView.scene = scene;
     self.gameView.playing = YES;
     self.gameView.loops = YES;
-    
+    self.allowLive = SYSTEM_VERSION_GREATER_THAN_OR_EQUAL_TO(@"10.0");
     // Various setup
     [self setupCamera];
     [self setupSounds];
@@ -89,12 +93,17 @@
     self.gameView.scene.physicsWorld.contactDelegate = self;
     self.gameView.delegate = self;
     
-
-    
     [self setupAutomaticCameraPositions];
     [self setupGameControllers];
     
-    [self setupBroadcastUI];
+    
+    //  Setup the broadcast controls only if we are on iOS >= 10
+    //
+    //
+    if(self.allowLive)
+    {
+        [self setupBroadcastUI];
+    }
 }
 
 #pragma mark - Setup ReplayKit Live
@@ -116,21 +125,32 @@
     //
     // Enable Microphone and Camera
     //
-    [RPScreenRecorder sharedRecorder].microphoneEnabled = YES;
-    [RPScreenRecorder sharedRecorder].cameraEnabled = YES;
+    RPScreenRecorder * recorder = [RPScreenRecorder sharedRecorder];
     
     
-    // Get notified when app is returned to active state or
-    // is moved into the foreground
-    //
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(resumeBroadcast)
-                                                 name:UIApplicationDidBecomeActiveNotification
-                                               object:[UIApplication sharedApplication]];
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(resumeBroadcast)
-                                                 name:UIApplicationWillEnterForegroundNotification
-                                               object:[UIApplication sharedApplication]];
+    if([recorder respondsToSelector:@selector(setCameraEnabled:)])
+    {
+        // This test will fail on devices < iOS 9
+        
+        [RPScreenRecorder sharedRecorder].microphoneEnabled = YES;
+        [RPScreenRecorder sharedRecorder].cameraEnabled = YES;
+        
+        [[AVAudioSession sharedInstance] requestRecordPermission: ^(BOOL granted){
+            
+        }];
+        // Get notified when app is returned to active state or
+        // is moved into the foreground
+        //
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(resumeBroadcast)
+                                                     name:UIApplicationDidBecomeActiveNotification
+                                                   object:[UIApplication sharedApplication]];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(resumeBroadcast)
+                                                     name:UIApplicationWillEnterForegroundNotification
+                                                   object:[UIApplication sharedApplication]];
+    }
+   
 }
 - (void) resumeBroadcast
 {
@@ -187,6 +207,11 @@
                                   error:(NSError *)error
 {
     
+    NSLog(@"BAC: %@ didFinishWBC: %@, err: %@",
+          broadcastActivityViewController,
+          broadcastController,
+          error);
+    
     // User has selected a broadcast service, now we should start streaming.
     
     [broadcastActivityViewController dismissViewControllerAnimated:YES completion:nil];
@@ -200,56 +225,63 @@
     self.broadcastController = broadcastController;
     
     __weak AAPLGameViewController* bSelf = self;
-    
-    [broadcastController startBroadcastWithHandler:^(NSError * _Nullable error) {
-        
-        if (!error) {
+    if(!error)
+    {
+        [broadcastController startBroadcastWithHandler:^(NSError * _Nullable error) {
             
-            // Broadcast has started
-            bSelf.broadcastController.delegate = self;
-            NSLog(@"Share URL: %@", broadcastController.broadcastURL);
-            
-            [bSelf.broadcastButton setImage:[UIImage imageNamed:@"broadcast_button_on"] forState:UIControlStateNormal];
-            
-            UIView* cameraView = [[RPScreenRecorder sharedRecorder] cameraPreviewView];
-            bSelf.cameraPreview = cameraView;
-            
-            if(cameraView)
-            {
-                // If the camera is enabled, create the camera preview and add it to the game's UIView
+            NSLog(@"broadcastControllerHandler");
+            if (!error) {
                 
-                cameraView.frame = CGRectMake(0, 0, 200, 200);
-                [bSelf.view addSubview:cameraView];
+                // Broadcast has started
+                bSelf.broadcastController.delegate = self;
+                
+                [bSelf.broadcastButton setImage:[UIImage imageNamed:@"broadcast_button_on"] forState:UIControlStateNormal];
+                
+                UIView* cameraView = [[RPScreenRecorder sharedRecorder] cameraPreviewView];
+                bSelf.cameraPreview = cameraView;
+                
+                if(cameraView)
                 {
-                    // Add a gesture recognizer so the user can drag the camera around the screen
-                    UIPanGestureRecognizer* gr = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(pan:)];
-                    [gr setMinimumNumberOfTouches:1];
-                    [gr setMaximumNumberOfTouches:1];
-                    [cameraView addGestureRecognizer:gr];
+                    // If the camera is enabled, create the camera preview and add it to the game's UIView
+                    
+                    cameraView.frame = CGRectMake(0, 0, 200, 200);
+                    [bSelf.view addSubview:cameraView];
+                    {
+                        // Add a gesture recognizer so the user can drag the camera around the screen
+                        UIPanGestureRecognizer* gr = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(pan:)];
+                        [gr setMinimumNumberOfTouches:1];
+                        [gr setMaximumNumberOfTouches:1];
+                        [cameraView addGestureRecognizer:gr];
+                    }
+                    {
+                        UITapGestureRecognizer* gr = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tap:)];
+                        [cameraView addGestureRecognizer:gr];
+                    }
                 }
-                {
-                    UITapGestureRecognizer* gr = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(tap:)];
-                    [cameraView addGestureRecognizer:gr];
-                }
+                
             }
-            
-        }
-        else {
-            // Some error has occurred starting the broadcast, surface it to the user.
-            UIAlertController *alertController = [UIAlertController alertControllerWithTitle:@"Error"
-                                                                                     message:error.localizedDescription
-                                                                              preferredStyle:UIAlertControllerStyleAlert];
-            
-            [alertController addAction:[UIAlertAction actionWithTitle:@"Ok"
-                                                                style:UIAlertActionStyleCancel
-                                                              handler:nil]];
-            
-            [self presentViewController:alertController
-                               animated:YES
-                             completion:nil];
-            
-        }
-    }];
+            else {
+                // Some error has occurred starting the broadcast, surface it to the user.
+                UIAlertController *alertController = [UIAlertController alertControllerWithTitle:@"Error"
+                                                                                         message:error.localizedDescription
+                                                                                  preferredStyle:UIAlertControllerStyleAlert];
+                
+                [alertController addAction:[UIAlertAction actionWithTitle:@"Ok"
+                                                                    style:UIAlertActionStyleCancel
+                                                                  handler:nil]];
+                
+                [self presentViewController:alertController
+                                   animated:YES
+                                 completion:nil];
+                
+            }
+        }];
+    }
+    else
+    {
+        NSLog(@"Error returning from Broadcast Activity: %@", error);
+    }
+
 }
 
 // Watch for service info from broadcast service
